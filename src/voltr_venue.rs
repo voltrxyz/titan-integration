@@ -33,7 +33,7 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 
 /// Number of accounts in the first instruction (`request_withdraw_vault`)
 /// when the returned redeem instruction is split into two.
-pub const REDEEM_SPLIT_INDEX: usize = 10;
+pub const REDEEM_SPLIT_INDEX: usize = 11;
 
 /// Titan-compatible trading venue for Voltr yield vaults.
 ///
@@ -46,7 +46,7 @@ pub const REDEEM_SPLIT_INDEX: usize = 10;
 ///   instruction whose `accounts` field contains the account metas for **two**
 ///   on-chain instructions that must be executed atomically in the same transaction:
 ///
-///   1. `request_withdraw_vault` — accounts `[0..REDEEM_SPLIT_INDEX]` (first 10)
+///   1. `request_withdraw_vault` — accounts `[0..REDEEM_SPLIT_INDEX]` (first 11)
 ///   2. `withdraw_vault`         — accounts `[REDEEM_SPLIT_INDEX..]`  (remaining 13)
 ///
 ///   The instruction `data` field is empty for the dummy; see the per-instruction
@@ -240,7 +240,7 @@ impl VoltrVaultVenue {
     /// ## Splitting into real instructions
     ///
     /// ```text
-    /// accounts[0..REDEEM_SPLIT_INDEX]   → request_withdraw_vault  (first 10 accounts)
+    /// accounts[0..REDEEM_SPLIT_INDEX]   → request_withdraw_vault  (first 11 accounts)
     /// accounts[REDEEM_SPLIT_INDEX..]    → withdraw_vault           (remaining 13 accounts)
     /// ```
     ///
@@ -310,34 +310,35 @@ impl VoltrVaultVenue {
                 &self.asset_token_program,
             );
 
-        let mut accounts = Vec::with_capacity(23);
+        let mut accounts = Vec::with_capacity(24);
 
-        // --- request_withdraw_vault accounts (indices 0..10) ---
+        // --- request_withdraw_vault accounts (indices 0..11) ---
         accounts.push(AccountMeta::new(*user, true));              // 0  payer (signer, writable)
-        accounts.push(AccountMeta::new_readonly(*user, true));     // 1  authority (signer)
+        accounts.push(AccountMeta::new_readonly(*user, true));     // 1  user_transfer_authority (signer)
         accounts.push(AccountMeta::new_readonly(protocol_pda, false)); // 2  protocol PDA
         accounts.push(AccountMeta::new_readonly(self.vault_key, false)); // 3  vault
         accounts.push(AccountMeta::new_readonly(vault_lp_mint_pda, false)); // 4  vault LP mint
         accounts.push(AccountMeta::new(user_lp_ata, false));       // 5  user LP ATA (source)
-        accounts.push(AccountMeta::new(receipt_lp_ata, false));    // 6  receipt LP ATA (dest)
+        accounts.push(AccountMeta::new(receipt_lp_ata, false));    // 6  receipt LP ATA (init_if_needed)
         accounts.push(AccountMeta::new(receipt_pda, false));       // 7  receipt PDA
-        accounts.push(AccountMeta::new_readonly(TOKEN_PROGRAM, false)); // 8  token program
-        accounts.push(AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false)); // 9  system program
+        accounts.push(AccountMeta::new_readonly(ATA_PROGRAM, false)); // 8  associated token program
+        accounts.push(AccountMeta::new_readonly(TOKEN_PROGRAM, false)); // 9  lp token program
+        accounts.push(AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false)); // 10 system program
 
-        // --- withdraw_vault accounts (indices 10..23) ---
-        accounts.push(AccountMeta::new(*user, true));              // 10 user (signer, writable)
-        accounts.push(AccountMeta::new_readonly(protocol_pda, false)); // 11 protocol PDA
-        accounts.push(AccountMeta::new(self.vault_key, false));    // 12 vault (writable)
-        accounts.push(AccountMeta::new_readonly(self.vault_state.asset.mint, false)); // 13 asset mint
-        accounts.push(AccountMeta::new(vault_lp_mint_pda, false)); // 14 vault LP mint (writable)
-        accounts.push(AccountMeta::new(receipt_lp_ata, false));    // 15 receipt LP ATA (writable)
-        accounts.push(AccountMeta::new(self.vault_state.asset.idle_ata, false)); // 16 idle ATA (writable)
-        accounts.push(AccountMeta::new(vault_asset_idle_auth_pda, false)); // 17 idle auth PDA (writable)
-        accounts.push(AccountMeta::new(user_asset_ata, false));    // 18 user asset ATA (writable)
-        accounts.push(AccountMeta::new(receipt_pda, false));       // 19 receipt PDA (writable)
-        accounts.push(AccountMeta::new_readonly(self.asset_token_program, false)); // 20 asset token program
-        accounts.push(AccountMeta::new_readonly(TOKEN_PROGRAM, false)); // 21 token program
-        accounts.push(AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false)); // 22 system program
+        // --- withdraw_vault accounts (indices 11..24) ---
+        accounts.push(AccountMeta::new(*user, true));              // 11 user (signer, writable)
+        accounts.push(AccountMeta::new_readonly(protocol_pda, false)); // 12 protocol PDA
+        accounts.push(AccountMeta::new(self.vault_key, false));    // 13 vault (writable)
+        accounts.push(AccountMeta::new_readonly(self.vault_state.asset.mint, false)); // 14 asset mint
+        accounts.push(AccountMeta::new(vault_lp_mint_pda, false)); // 15 vault LP mint (writable)
+        accounts.push(AccountMeta::new(receipt_lp_ata, false));    // 16 receipt LP ATA (writable)
+        accounts.push(AccountMeta::new(self.vault_state.asset.idle_ata, false)); // 17 idle ATA (writable)
+        accounts.push(AccountMeta::new(vault_asset_idle_auth_pda, false)); // 18 idle auth PDA (writable)
+        accounts.push(AccountMeta::new(user_asset_ata, false));    // 19 user asset ATA (writable)
+        accounts.push(AccountMeta::new(receipt_pda, false));       // 20 receipt PDA (writable)
+        accounts.push(AccountMeta::new_readonly(self.asset_token_program, false)); // 21 asset token program
+        accounts.push(AccountMeta::new_readonly(TOKEN_PROGRAM, false)); // 22 lp token program
+        accounts.push(AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false)); // 23 system program
 
         Ok(Instruction {
             program_id: VOLTR_VAULT_PROGRAM,
