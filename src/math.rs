@@ -77,11 +77,28 @@ pub fn calc_management_fee_amount_in_asset(
     Ok(u64::try_from(fee_amount)?)
 }
 
+/// Fractional bits in the on-chain U80F48 fixed-point type.
+const FRAC_BITS: u32 = 48;
+
+/// Compute `(a * b) / c` using schoolbook division to avoid u128 overflow.
+fn mul_div(a: u128, b: u64, c: u64) -> Result<u128> {
+    if c == 0 {
+        return Err(VoltrError::DivisionByZero.into());
+    }
+    let c128 = c as u128;
+    let b128 = b as u128;
+    let q = a / c128;
+    let r = a % c128;
+    q.checked_mul(b128)
+        .and_then(|v| v.checked_add((r * b128) / c128))
+        .ok_or_else(|| VoltrError::MathOverflow.into())
+}
+
 /// Calculate asset tokens to redeem for a given LP burn amount.
 ///
-/// Formula (from on-chain accounting.rs):
-///   asset_pre_fee = lp_to_burn * (total_unlocked_asset / total_lp_supply_incl_fees)
-///   asset_post_fee = asset_pre_fee * (10000 - redemption_fee_bps) / 10000
+/// Replicates the on-chain U80F48 fixed-point arithmetic:
+///   Decimal::from_num(lp).full_mul_int_ratio(asset, supply)
+///       .full_mul_int_ratio(MAX_FEE_BPS - fee, MAX_FEE_BPS).to_floor()
 pub fn calc_withdraw_asset_to_redeem(
     amount_lp_to_burn: u64,
     total_lp_supply_pre_withdraw: u64,
@@ -92,21 +109,15 @@ pub fn calc_withdraw_asset_to_redeem(
         return Err(VoltrError::DivisionByZero.into());
     }
 
-    let asset_pre_fee = (amount_lp_to_burn as u128)
-        .checked_mul(total_unlocked_asset as u128)
-        .and_then(|v| v.checked_div(total_lp_supply_pre_withdraw as u128))
-        .ok_or(VoltrError::MathOverflow)?;
+    let bits = (amount_lp_to_burn as u128) << FRAC_BITS;
+    let bits = mul_div(bits, total_unlocked_asset, total_lp_supply_pre_withdraw)?;
 
     let fee_adjusted = MAX_FEE_BPS
         .checked_sub(redemption_fee_bps)
-        .ok_or(VoltrError::MathOverflow)? as u128;
-
-    let asset_post_fee = asset_pre_fee
-        .checked_mul(fee_adjusted)
-        .and_then(|v| v.checked_div(MAX_FEE_BPS as u128))
         .ok_or(VoltrError::MathOverflow)?;
+    let bits = mul_div(bits, fee_adjusted as u64, MAX_FEE_BPS as u64)?;
 
-    Ok(u64::try_from(asset_post_fee)?)
+    Ok(u64::try_from(bits >> FRAC_BITS)?)
 }
 
 /// Calculate LP tokens to mint for accumulated fees.

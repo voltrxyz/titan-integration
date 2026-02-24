@@ -82,8 +82,7 @@ mod simulations {
         (litesvm, keypair)
     }
 
-    /// Simulate a deposit using LiteSVM and return the output amount of LP tokens.
-    /// This should give the true on-chain output for that deposit.
+    /// Simulate a swap using LiteSVM and return the output token amount.
     async fn sim_quote_request(
         venue: &dyn TradingVenue,
         cache: &dyn AccountsCache,
@@ -246,31 +245,33 @@ mod simulations {
         let tradable_mints = venue.get_token_info();
         assert_eq!(tradable_mints.len(), 2);
 
-        // Deposit direction: asset (0) -> LP (1)
-        let (in_idx, out_idx) = (0, 1);
-        let (lower, upper) = venue.bounds(in_idx as u8, out_idx as u8).unwrap();
+        for (in_idx, out_idx) in [(0, 1), (1, 0)] {
+            let (lower, upper) = venue.bounds(in_idx as u8, out_idx as u8).unwrap();
 
-        for bound in [lower, upper] {
-            let request = QuoteRequest {
-                input_mint: venue.get_token(in_idx).unwrap().pubkey,
-                output_mint: venue.get_token(out_idx).unwrap().pubkey,
-                amount: bound,
-                swap_type: SwapType::ExactIn,
-            };
+            for bound in [lower, upper] {
+                let request = QuoteRequest {
+                    input_mint: venue.get_token(in_idx).unwrap().pubkey,
+                    output_mint: venue.get_token(out_idx).unwrap().pubkey,
+                    amount: bound,
+                    swap_type: SwapType::ExactIn,
+                };
 
-            let sim =
-                sim_quote_request(&venue, &cache, request.clone(), &mut litesvm, &keypair).await;
-            let quote = venue.quote(request).unwrap();
+                let sim =
+                    sim_quote_request(&venue, &cache, request.clone(), &mut litesvm, &keypair)
+                        .await;
+                let quote = venue.quote(request).unwrap();
 
-            log::debug!(
-                "Boundary = {}\nSimulated = {}\nOff-chain quote = {}\nDelta = {}",
-                bound,
-                sim,
-                quote.expected_output,
-                quote.expected_output.abs_diff(sim)
-            );
+                log::debug!(
+                    "Direction = ({} -> {})\nBoundary = {}\nSimulated = {}\nOff-chain quote = {}\nDelta = {}",
+                    in_idx, out_idx,
+                    bound,
+                    sim,
+                    quote.expected_output,
+                    quote.expected_output.abs_diff(sim)
+                );
 
-            assert_eq!(quote.expected_output.abs_diff(sim), 0);
+                assert_eq!(quote.expected_output.abs_diff(sim), 0);
+            }
         }
     }
 
@@ -309,31 +310,34 @@ mod simulations {
         let tradable_mints = venue.get_token_info();
         assert_eq!(tradable_mints.len(), 2);
 
-        // Deposit direction: asset (0) -> LP (1)
-        let (lb, ub) = venue.bounds(0, 1).unwrap();
+        for (in_idx, out_idx) in [(0, 1), (1, 0)] {
+            let (lb, ub) = venue.bounds(in_idx as u8, out_idx as u8).unwrap();
 
-        for _ in 0..50 {
-            let amount = sample_log_uniform_u64(lb, ub);
+            for _ in 0..50 {
+                let amount = sample_log_uniform_u64(lb, ub);
 
-            let request = QuoteRequest {
-                input_mint: venue.get_token(0).unwrap().pubkey,
-                output_mint: venue.get_token(1).unwrap().pubkey,
-                amount,
-                swap_type: SwapType::ExactIn,
-            };
+                let request = QuoteRequest {
+                    input_mint: venue.get_token(in_idx).unwrap().pubkey,
+                    output_mint: venue.get_token(out_idx).unwrap().pubkey,
+                    amount,
+                    swap_type: SwapType::ExactIn,
+                };
 
-            let sim =
-                sim_quote_request(&venue, &cache, request.clone(), &mut litesvm, &keypair).await;
-            let quote = venue.quote(request).unwrap();
+                let sim =
+                    sim_quote_request(&venue, &cache, request.clone(), &mut litesvm, &keypair)
+                        .await;
+                let quote = venue.quote(request).unwrap();
 
-            log::debug!(
-                "Random sim: {}\nQuote: {}\nDelta: {}",
-                sim,
-                quote.expected_output,
-                quote.expected_output.abs_diff(sim)
-            );
+                log::debug!(
+                    "Direction = ({} -> {})\nRandom sim: {}\nQuote: {}\nDelta: {}",
+                    in_idx, out_idx,
+                    sim,
+                    quote.expected_output,
+                    quote.expected_output.abs_diff(sim)
+                );
 
-            assert_eq!(quote.expected_output.abs_diff(sim), 0);
+                assert_eq!(quote.expected_output.abs_diff(sim), 0);
+            }
         }
     }
 

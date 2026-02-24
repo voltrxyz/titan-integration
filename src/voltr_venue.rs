@@ -31,26 +31,16 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
     sighash
 }
 
-/// Number of accounts in the first instruction (`request_withdraw_vault`)
-/// when the returned redeem instruction is split into two.
-pub const REDEEM_SPLIT_INDEX: usize = 11;
-
 /// Titan-compatible trading venue for Voltr yield vaults.
 ///
 /// Voltr vaults accept deposits of an underlying asset and issue LP tokens
 /// representing a share of the vault's total value. This venue supports:
 ///
-/// - **Deposits** (asset -> LP): `generate_swap_instruction()` returns a real
-///   `deposit_vault` instruction that can be submitted directly.
-/// - **Redeems** (LP -> asset): `generate_swap_instruction()` returns a **dummy**
-///   instruction whose `accounts` field contains the account metas for **two**
-///   on-chain instructions that must be executed atomically in the same transaction:
-///
-///   1. `request_withdraw_vault` — accounts `[0..REDEEM_SPLIT_INDEX]` (first 11)
-///   2. `withdraw_vault`         — accounts `[REDEEM_SPLIT_INDEX..]`  (remaining 13)
-///
-///   The instruction `data` field is empty for the dummy; see the per-instruction
-///   data formats documented on `build_redeem_dummy_instruction()`.
+/// - **Deposits** (asset -> LP): `generate_swap_instruction()` returns a
+///   `deposit_vault` instruction.
+/// - **Redeems** (LP -> asset): `generate_swap_instruction()` returns an
+///   `instant_withdraw_vault` instruction that burns LP directly from the
+///   user's ATA and transfers the underlying asset in a single instruction.
 #[derive(Clone)]
 pub struct VoltrVaultVenue {
     pub vault_key: Pubkey,
@@ -232,36 +222,10 @@ impl VoltrVaultVenue {
         })
     }
 
-    /// Build a dummy `Instruction` for Voltr vault redeems (LP -> asset).
-    ///
-    /// The returned instruction is **not** executable as-is. Its `accounts` field
-    /// contains the account metas for **two** on-chain instructions, concatenated:
-    ///
-    /// ## Splitting into real instructions
-    ///
-    /// ```text
-    /// accounts[0..REDEEM_SPLIT_INDEX]   → request_withdraw_vault  (first 11 accounts)
-    /// accounts[REDEEM_SPLIT_INDEX..]    → withdraw_vault           (remaining 13 accounts)
-    /// ```
-    ///
-    /// Both must be submitted atomically in the same transaction.
-    ///
-    /// ## Instruction data formats
-    ///
-    /// **`request_withdraw_vault`** (program_id = `VOLTR_VAULT_PROGRAM`):
-    /// ```text
-    /// [0..8]   anchor discriminator for "request_withdraw_vault"
-    /// [8..16]  lp_amount: u64 (little-endian)
-    /// [16]     is_amount_in_lp: u8 = 1
-    /// [17]     is_withdraw_all: u8 = 0
-    /// ```
-    ///
-    /// **`withdraw_vault`** (program_id = `VOLTR_VAULT_PROGRAM`):
-    /// ```text
-    /// [0..8]   anchor discriminator for "withdraw_vault"
-    /// ```
-    fn build_redeem_dummy_instruction(
+    /// Build the `instant_withdraw_vault` instruction for a redeem (LP -> asset).
+    fn build_instant_withdraw_vault_instruction(
         &self,
+        redeem_amount: u64,
         user: &Pubkey,
     ) -> Result<Instruction, TradingVenueError> {
         let (protocol_pda, _) =
@@ -277,25 +241,6 @@ impl VoltrVaultVenue {
             &VOLTR_VAULT_PROGRAM,
         );
 
-        let (receipt_pda, _) = Pubkey::find_program_address(
-            &[
-                REQUEST_WITHDRAW_VAULT_RECEIPT_SEED,
-                self.vault_key.as_ref(),
-                user.as_ref(),
-            ],
-            &VOLTR_VAULT_PROGRAM,
-        );
-
-        let receipt_lp_ata = Pubkey::find_program_address(
-            &[
-                receipt_pda.as_ref(),
-                TOKEN_PROGRAM.as_ref(),
-                vault_lp_mint_pda.as_ref(),
-            ],
-            &ATA_PROGRAM,
-        )
-        .0;
-
         let user_lp_ata =
             spl_associated_token_account::get_associated_token_address_with_program_id(
                 user,
@@ -310,54 +255,32 @@ impl VoltrVaultVenue {
                 &self.asset_token_program,
             );
 
-        let mut accounts = Vec::with_capacity(24);
+        let accounts = vec![
+            AccountMeta::new_readonly(*user, true),
+            AccountMeta::new_readonly(protocol_pda, false),
+            AccountMeta::new(self.vault_key, false),
+            AccountMeta::new_readonly(self.vault_state.asset.mint, false),
+            AccountMeta::new(vault_lp_mint_pda, false),
+            AccountMeta::new(user_lp_ata, false),
+            AccountMeta::new(self.vault_state.asset.idle_ata, false),
+            AccountMeta::new(vault_asset_idle_auth_pda, false),
+            AccountMeta::new(user_asset_ata, false),
+            AccountMeta::new_readonly(self.asset_token_program, false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ];
 
-        // --- request_withdraw_vault accounts (indices 0..11) ---
-        accounts.push(AccountMeta::new(*user, true));              // 0  payer (signer, writable)
-        accounts.push(AccountMeta::new_readonly(*user, true));     // 1  user_transfer_authority (signer)
-        accounts.push(AccountMeta::new_readonly(protocol_pda, false)); // 2  protocol PDA
-        accounts.push(AccountMeta::new_readonly(self.vault_key, false)); // 3  vault
-        accounts.push(AccountMeta::new_readonly(vault_lp_mint_pda, false)); // 4  vault LP mint
-        accounts.push(AccountMeta::new(user_lp_ata, false));       // 5  user LP ATA (source)
-        accounts.push(AccountMeta::new(receipt_lp_ata, false));    // 6  receipt LP ATA (init_if_needed)
-        accounts.push(AccountMeta::new(receipt_pda, false));       // 7  receipt PDA
-        accounts.push(AccountMeta::new_readonly(ATA_PROGRAM, false)); // 8  associated token program
-        accounts.push(AccountMeta::new_readonly(TOKEN_PROGRAM, false)); // 9  lp token program
-        accounts.push(AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false)); // 10 system program
-
-        // --- withdraw_vault accounts (indices 11..24) ---
-        accounts.push(AccountMeta::new(*user, true));              // 11 user (signer, writable)
-        accounts.push(AccountMeta::new_readonly(protocol_pda, false)); // 12 protocol PDA
-        accounts.push(AccountMeta::new(self.vault_key, false));    // 13 vault (writable)
-        accounts.push(AccountMeta::new_readonly(self.vault_state.asset.mint, false)); // 14 asset mint
-        accounts.push(AccountMeta::new(vault_lp_mint_pda, false)); // 15 vault LP mint (writable)
-        accounts.push(AccountMeta::new(receipt_lp_ata, false));    // 16 receipt LP ATA (writable)
-        accounts.push(AccountMeta::new(self.vault_state.asset.idle_ata, false)); // 17 idle ATA (writable)
-        accounts.push(AccountMeta::new(vault_asset_idle_auth_pda, false)); // 18 idle auth PDA (writable)
-        accounts.push(AccountMeta::new(user_asset_ata, false));    // 19 user asset ATA (writable)
-        accounts.push(AccountMeta::new(receipt_pda, false));       // 20 receipt PDA (writable)
-        accounts.push(AccountMeta::new_readonly(self.asset_token_program, false)); // 21 asset token program
-        accounts.push(AccountMeta::new_readonly(TOKEN_PROGRAM, false)); // 22 lp token program
-        accounts.push(AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false)); // 23 system program
+        let mut data = Vec::with_capacity(18);
+        data.extend_from_slice(&anchor_discriminator("instant_withdraw_vault"));
+        data.extend_from_slice(&redeem_amount.to_le_bytes());
+        data.push(1u8);
+        data.push(0u8);
 
         Ok(Instruction {
             program_id: VOLTR_VAULT_PROGRAM,
             accounts,
-            data: vec![], // dummy — see doc comment for per-instruction data formats
+            data,
         })
-    }
-
-    /// Derive the receipt PDA for a given vault and user.
-    pub fn derive_receipt_pda(vault_key: &Pubkey, user: &Pubkey) -> Pubkey {
-        Pubkey::find_program_address(
-            &[
-                REQUEST_WITHDRAW_VAULT_RECEIPT_SEED,
-                vault_key.as_ref(),
-                user.as_ref(),
-            ],
-            &VOLTR_VAULT_PROGRAM,
-        )
-        .0
     }
 
     /// Derive the vault LP mint PDA.
@@ -621,7 +544,7 @@ impl TradingVenue for VoltrVaultVenue {
         }
 
         if is_redeem {
-            return self.build_redeem_dummy_instruction(&user);
+            return self.build_instant_withdraw_vault_instruction(request.amount, &user);
         }
 
         self.build_deposit_instruction(request.amount, &user)
